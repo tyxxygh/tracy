@@ -1,4 +1,4 @@
-#include <algorithm>
+﻿#include <algorithm>
 #include <assert.h>
 #include <atomic>
 #include <chrono>
@@ -85,7 +85,8 @@ enum class ViewShutdown { False, True, Join };
 static tracy::unordered_flat_map<uint64_t, ClientData> clients;
 static std::unique_ptr<tracy::View> view;
 static tracy::BadVersionState badVer;
-static uint16_t port = 8086;
+//static uint16_t port = 8086;
+static uint16_t port = 24773;
 static const char* connectTo = nullptr;
 static char title[128];
 static std::thread loadThread, updateThread, updateNotesThread;
