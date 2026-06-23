@@ -21,19 +21,31 @@ extern double s_time;
 void View::FindZones()
 {
     m_findZone.hasResults = true;
-    m_findZone.match = m_worker.GetMatchingSourceLocation( m_findZone.pattern, m_findZone.ignoreCase );
-    if( m_findZone.match.empty() ) return;
+    auto allMatch = m_worker.GetMatchingSourceLocation( m_findZone.pattern, m_findZone.ignoreCase );
 
-    auto it = m_findZone.match.begin();
-    while( it != m_findZone.match.end() )
+    m_findZone.match.clear();
+    m_findZone.gpuMatch.clear();
+
+    if( allMatch.empty() ) return;
+
+    const bool wantCpu = m_findZone.searchScope != FindZone::SearchScope::GpuOnly;
+    const bool wantGpu = m_findZone.searchScope != FindZone::SearchScope::CpuOnly;
+
+    const auto& gpuSlz = m_worker.GetGpuSourceLocationZones();
+
+    for( auto srcloc : allMatch )
     {
-        if( m_worker.GetZonesForSourceLocation( *it ).zones.empty() )
+        if( wantCpu && !m_worker.GetZonesForSourceLocation( srcloc ).zones.empty() )
         {
-            it = m_findZone.match.erase( it );
+            m_findZone.match.push_back( srcloc );
         }
-        else
+        if( wantGpu )
         {
-            ++it;
+            auto git = gpuSlz.find( srcloc );
+            if( git != gpuSlz.end() && !git->second.zones.empty() )
+            {
+                m_findZone.gpuMatch.push_back( srcloc );
+            }
         }
     }
 }
@@ -72,6 +84,107 @@ uint64_t View::GetSelectionTarget( const Worker::ZoneThreadData& ev, FindZone::G
         assert( false );
         return 0;
     }
+}
+
+void View::DrawGpuZoneList( int id, const Worker::GpuZoneThreadData* zones, size_t count )
+{
+    char buf[32];
+    sprintf( buf, "%i##gpuzonelist", id );
+    if( !ImGui::BeginTable( buf, 2, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY, ImVec2( 0, ImGui::GetTextLineHeightWithSpacing() * std::min<size_t>( count + 1, 15 ) ) ) )
+    {
+        ImGui::TreePop();
+        return;
+    }
+    ImGui::TableSetupScrollFreeze( 0, 1 );
+    ImGui::TableSetupColumn( "GPU start (calibrated)" );
+    ImGui::TableSetupColumn( "GPU execution time", ImGuiTableColumnFlags_PreferSortDescending );
+    ImGui::TableHeadersRow();
+
+    // Build calibration map: actual thread id -> (begin, drift)
+    struct GpuCalibInfo { int64_t begin; int drift; };
+    unordered_flat_map<uint64_t, GpuCalibInfo> gpuCalib;
+    for( auto& ctx : m_worker.GetGpuData() )
+    {
+        const int drift = GpuDrift( ctx );
+        for( auto& td : ctx->threadData )
+        {
+            if( td.second.timeline.empty() ) continue;
+            int64_t begin;
+            if( td.second.timeline.is_magic() )
+                begin = ((const Vector<GpuEvent>*)&td.second.timeline)->front().GpuStart();
+            else
+                begin = td.second.timeline.front()->GpuStart();
+            if( begin >= 0 ) gpuCalib[td.first] = { begin, drift };
+        }
+    }
+
+    // Build sortable index array
+    std::vector<size_t> indices( count );
+    std::iota( indices.begin(), indices.end(), 0 );
+
+    const auto& sortspec = *ImGui::TableGetSortSpecs()->Specs;
+    if( sortspec.ColumnIndex == 1 )
+    {
+        auto getDur = [&]( size_t i ) -> int64_t {
+            auto& z = *zones[i].Zone();
+            auto tid = m_worker.DecompressThread( zones[i].Thread() );
+            auto calit = gpuCalib.find( tid );
+            if( calit != gpuCalib.end() )
+                return AdjustGpuTime( z.GpuEnd(), calit->second.begin, calit->second.drift )
+                     - AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
+            return z.GpuEnd() - z.GpuStart();
+        };
+        if( sortspec.SortDirection == ImGuiSortDirection_Descending )
+            pdqsort_branchless( indices.begin(), indices.end(), [&]( size_t a, size_t b ) { return getDur(a) > getDur(b); } );
+        else
+            pdqsort_branchless( indices.begin(), indices.end(), [&]( size_t a, size_t b ) { return getDur(a) < getDur(b); } );
+    }
+
+    ImGuiListClipper clipper;
+    clipper.Begin( (int)count );
+    while( clipper.Step() )
+    {
+        for( int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++ )
+        {
+            const size_t idx = indices[i];
+            auto& ztd = zones[idx];
+            auto& z = *ztd.Zone();
+            if( z.GpuStart() < 0 || z.GpuEnd() < 0 ) continue;
+
+            auto tid = m_worker.DecompressThread( ztd.Thread() );
+            auto calit = gpuCalib.find( tid );
+            int64_t adjStart, adjEnd;
+            if( calit != gpuCalib.end() )
+            {
+                adjStart = AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
+                adjEnd   = AdjustGpuTime( z.GpuEnd(),   calit->second.begin, calit->second.drift );
+            }
+            else
+            {
+                adjStart = z.GpuStart();
+                adjEnd   = z.GpuEnd();
+            }
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::PushID( (int)idx );
+            if( ImGui::Selectable( TimeToStringExact( adjStart ), m_gpuInfoWindow == &z, ImGuiSelectableFlags_SpanAllColumns ) )
+            {
+                ShowZoneInfo( z, m_worker.DecompressThread( ztd.Thread() ) );
+            }
+            if( ImGui::IsItemHovered() )
+            {
+                m_gpuHighlight = &z;
+                if( IsMouseClicked( 2 ) ) ZoomToZone( z );
+                ZoneTooltip( z );
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted( TimeToString( adjEnd - adjStart ) );
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndTable();
+    ImGui::TreePop();
 }
 
 void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
@@ -265,27 +378,43 @@ void View::DrawFindZone()
     ImGui::TextWrapped( "Collection of statistical data is disabled in this build." );
     ImGui::TextWrapped( "Rebuild without the TRACY_NO_STATISTICS macro to enable zone search." );
 #else
-    if( !m_worker.AreSourceLocationZonesReady() )
     {
-        const auto ty = ImGui::GetTextLineHeight();
-        ImGui::PushFont( g_fonts.normal, FontBig );
-        ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 - ty ) * 0.5f ) );
-        TextCentered( ICON_FA_CROW );
-        TextCentered( "Please wait, computing data..." );
-        ImGui::PopFont();
-        DrawWaitingDots( s_time );
-        ImGui::End();
-        return;
-    }
-    if( m_worker.GetZoneCount() == 0 )
-    {
-        ImGui::PushFont( g_fonts.normal, FontBig );
-        ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
-        TextCentered( ICON_FA_CROW );
-        TextCentered( "No zones were collected" );
-        ImGui::PopFont();
-        ImGui::End();
-        return;
+        const bool wantCpuCheck = m_findZone.searchScope != FindZone::SearchScope::GpuOnly;
+        const bool wantGpuCheck = m_findZone.searchScope != FindZone::SearchScope::CpuOnly;
+        if( wantCpuCheck && !m_worker.AreSourceLocationZonesReady() )
+        {
+            const auto ty = ImGui::GetTextLineHeight();
+            ImGui::PushFont( g_fonts.normal, FontBig );
+            ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 - ty ) * 0.5f ) );
+            TextCentered( ICON_FA_CROW );
+            TextCentered( "Please wait, computing data..." );
+            ImGui::PopFont();
+            DrawWaitingDots( s_time );
+            ImGui::End();
+            return;
+        }
+        if( wantGpuCheck && !m_worker.AreGpuSourceLocationZonesReady() )
+        {
+            const auto ty = ImGui::GetTextLineHeight();
+            ImGui::PushFont( g_fonts.normal, FontBig );
+            ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 - ty ) * 0.5f ) );
+            TextCentered( ICON_FA_CROW );
+            TextCentered( "Please wait, computing GPU data..." );
+            ImGui::PopFont();
+            DrawWaitingDots( s_time );
+            ImGui::End();
+            return;
+        }
+        if( wantCpuCheck && !wantGpuCheck && m_worker.GetZoneCount() == 0 )
+        {
+            ImGui::PushFont( g_fonts.normal, FontBig );
+            ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
+            TextCentered( ICON_FA_CROW );
+            TextCentered( "No zones were collected" );
+            ImGui::PopFont();
+            ImGui::End();
+            return;
+        }
     }
 
     bool findClicked = false;
@@ -313,6 +442,27 @@ void View::DrawFindZone()
     }
     ImGui::SameLine();
     ImGui::Checkbox( "Ignore case", &m_findZone.ignoreCase );
+    ImGui::SameLine();
+    ImGui::Spacing();
+    ImGui::SameLine();
+    ImGui::SeparatorEx( ImGuiSeparatorFlags_Vertical );
+    ImGui::SameLine();
+    ImGui::Spacing();
+    ImGui::SameLine();
+    {
+        int scope = (int)m_findZone.searchScope;
+        bool scopeChanged = ImGui::RadioButton( ICON_FA_MICROCHIP " CPU", &scope, 0 );
+        ImGui::SameLine();
+        scopeChanged |= ImGui::RadioButton( ICON_FA_EYE " GPU", &scope, 1 );
+        ImGui::SameLine();
+        scopeChanged |= ImGui::RadioButton( "Both", &scope, 2 );
+        if( scopeChanged )
+        {
+            m_findZone.searchScope = (FindZone::SearchScope)scope;
+            m_findZone.Reset();
+            FindZones();
+        }
+    }
     ImGui::SameLine();
     ImGui::Spacing();
     ImGui::SameLine();
@@ -347,7 +497,7 @@ void View::DrawFindZone()
     ImGui::Separator();
     ImGui::BeginChild( "##findzone" );
 
-    if( m_findZone.match.empty() )
+    if( m_findZone.match.empty() && m_findZone.gpuMatch.empty() )
     {
         ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
@@ -369,7 +519,10 @@ void View::DrawFindZone()
         const auto rangeMin = m_findZone.range.min;
         const auto rangeMax = m_findZone.range.max;
 
-        bool expand = ImGui::TreeNodeEx( "Matched source locations", ImGuiTreeNodeFlags_DefaultOpen );
+        if( !m_findZone.match.empty() )
+        {
+
+        bool expand = ImGui::TreeNodeEx( "CPU Matched source locations", ImGuiTreeNodeFlags_DefaultOpen );
         ImGui::SameLine();
         ImGui::TextDisabled( "(%zu)", m_findZone.match.size() );
         if( expand )
@@ -2033,6 +2186,237 @@ void View::DrawFindZone()
         {
             auto& srcloc = m_worker.GetSourceLocation( changeZone );
             m_findZone.ShowZone( changeZone, m_worker.GetString( srcloc.name.active ? srcloc.name : srcloc.function ) );
+        }
+
+        } // end of if( !m_findZone.match.empty() )
+
+        // ---- GPU Find Zone results ----
+        if( !m_findZone.gpuMatch.empty() )
+        {
+            ImGui::Separator();
+
+            // GPU matched source locations
+            {
+                bool gpuExpand = ImGui::TreeNodeEx( ICON_FA_EYE " GPU Matched source locations", ImGuiTreeNodeFlags_DefaultOpen );
+                ImGui::SameLine();
+                ImGui::TextDisabled( "(%zu)", m_findZone.gpuMatch.size() );
+                if( gpuExpand )
+                {
+                    auto prevGpu = m_findZone.selGpuMatch;
+                    int gidx = 0;
+                    const auto& gpuSlz = m_worker.GetGpuSourceLocationZones();
+                    for( auto& v : m_findZone.gpuMatch )
+                    {
+                        auto& srcloc = m_worker.GetSourceLocation( v );
+                        const auto git = gpuSlz.find( v );
+                        const size_t zoneCnt = git != gpuSlz.end() ? git->second.zones.size() : 0;
+                        SmallColorBox( GetSrcLocColor( srcloc, 0 ) );
+                        ImGui::SameLine();
+                        ImGui::PushID( 0x10000 + gidx );
+                        ImGui::PushStyleVar( ImGuiStyleVar_FramePadding, ImVec2( 0, 0 ) );
+                        ImGui::RadioButton( m_worker.GetString( srcloc.name.active ? srcloc.name : srcloc.function ), &m_findZone.selGpuMatch, gidx++ );
+                        ImGui::PopStyleVar();
+                        ImGui::SameLine();
+                        const auto fileName = m_worker.GetString( srcloc.file );
+                        ImGui::TextColored( ImVec4( 0.5f, 0.5f, 0.5f, 1.f ), "(%s) %s", RealToString( zoneCnt ), LocationToString( fileName, srcloc.line ) );
+                        if( ImGui::IsItemHovered() )
+                        {
+                            DrawSourceTooltip( fileName, srcloc.line );
+                            if( ImGui::IsItemClicked( 1 ) )
+                            {
+                                if( SourceFileValid( fileName, m_worker.GetCaptureTime(), *this, m_worker ) )
+                                    ViewSourceCheckKeyMod( fileName, srcloc.line, m_worker.GetString( srcloc.function ) );
+                                else
+                                    m_findZoneBuzzAnim.Enable( gidx, 0.5f );
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::TreePop();
+                    if( m_findZone.selGpuMatch != prevGpu )
+                        m_findZone.ResetGpuMatch();
+                }
+            }
+
+            // GPU histogram and stats
+            {
+                const auto& gpuSlz = m_worker.GetGpuSourceLocationZones();
+                const auto gpuSelSrcLoc = m_findZone.gpuMatch[m_findZone.selGpuMatch];
+                const auto git = gpuSlz.find( gpuSelSrcLoc );
+                if( git != gpuSlz.end() )
+                {
+                    const auto& gpuZones = git->second.zones;
+                    const auto gpuZsz = gpuZones.size();
+
+                    // Build calibration map
+                    struct GpuCalibInfo2 { int64_t begin; int drift; };
+                    unordered_flat_map<uint64_t, GpuCalibInfo2> gpuCalib2;
+                    for( auto& ctx : m_worker.GetGpuData() )
+                    {
+                        const int drift = GpuDrift( ctx );
+                        for( auto& td : ctx->threadData )
+                        {
+                            if( td.second.timeline.empty() ) continue;
+                            int64_t begin;
+                            if( td.second.timeline.is_magic() )
+                                begin = ((const Vector<GpuEvent>*)&td.second.timeline)->front().GpuStart();
+                            else
+                                begin = td.second.timeline.front()->GpuStart();
+                            if( begin >= 0 ) gpuCalib2[td.first] = { begin, drift };
+                        }
+                    }
+
+                    // Compute sorted calibrated durations (incremental)
+                    if( m_findZone.gpuSortedNum != gpuZsz )
+                    {
+                        auto& vec = m_findZone.gpuSorted;
+                        const auto vszorig = vec.size();
+                        vec.reserve( gpuZsz );
+                        int64_t total = m_findZone.gpuTotal;
+                        int64_t tmin = m_findZone.gpuTmin;
+                        int64_t tmax = m_findZone.gpuTmax;
+                        size_t gi;
+                        for( gi = m_findZone.gpuSortedNum; gi < gpuZsz; gi++ )
+                        {
+                            auto& ztd = gpuZones[gi];
+                            auto& z = *ztd.Zone();
+                            if( z.GpuStart() < 0 || z.GpuEnd() < 0 ) continue;
+                            auto tid = m_worker.DecompressThread( ztd.Thread() );
+                            auto calit = gpuCalib2.find( tid );
+                            int64_t adjStart, adjEnd;
+                            if( calit != gpuCalib2.end() )
+                            {
+                                adjStart = AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
+                                adjEnd   = AdjustGpuTime( z.GpuEnd(),   calit->second.begin, calit->second.drift );
+                            }
+                            else
+                            {
+                                adjStart = z.GpuStart();
+                                adjEnd   = z.GpuEnd();
+                            }
+                            const auto t = adjEnd - adjStart;
+                            if( t < 0 ) continue;
+                            vec.push_back_no_space_check( t );
+                            total += t;
+                            if( t < tmin ) tmin = t;
+                            if( t > tmax ) tmax = t;
+                        }
+                        auto mid = vec.begin() + vszorig;
+                        pdqsort_branchless( mid, vec.end() );
+                        std::inplace_merge( vec.begin(), mid, vec.end() );
+                        const auto vsz = vec.size();
+                        if( vsz != 0 )
+                        {
+                            m_findZone.gpuAverage = float( total ) / vsz;
+                            m_findZone.gpuMedian  = (float)vec[vsz / 2];
+                            m_findZone.gpuTotal   = total;
+                            m_findZone.gpuTmin    = tmin;
+                            m_findZone.gpuTmax    = tmax;
+                        }
+                        m_findZone.gpuSortedNum = gi;
+                    }
+
+                    // Stats display
+                    if( m_findZone.gpuTmin != std::numeric_limits<int64_t>::max() && !m_findZone.gpuSorted.empty() )
+                    {
+                        const auto& gpuSorted = m_findZone.gpuSorted;
+                        const auto gpuSortedSz = gpuSorted.size();
+
+                        TextFocused( ICON_FA_EYE " GPU zones:", RealToString( gpuSortedSz ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "Total:", TimeToString( m_findZone.gpuTotal ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "Mean:", TimeToString( (int64_t)m_findZone.gpuAverage ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "Median:", TimeToString( (int64_t)m_findZone.gpuMedian ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "Min:", TimeToString( m_findZone.gpuTmin ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "Max:", TimeToString( m_findZone.gpuTmax ) );
+
+                        // Simple histogram
+                        const auto gpuTmin = m_findZone.gpuTmin;
+                        const auto gpuTmax = m_findZone.gpuTmax;
+                        if( gpuTmax - gpuTmin > 0 )
+                        {
+                            const auto w = ImGui::GetContentRegionAvail().x;
+                            const auto numBins = int64_t( w - 4 );
+                            if( numBins > 1 )
+                            {
+                                if( m_findZone.gpuNumBins != numBins )
+                                {
+                                    m_findZone.gpuNumBins = numBins;
+                                    m_findZone.gpuBins    = std::make_unique<int64_t[]>( numBins );
+                                    m_findZone.gpuBinTime = std::make_unique<int64_t[]>( numBins );
+                                }
+                                memset( m_findZone.gpuBins.get(),    0, sizeof(int64_t) * numBins );
+                                memset( m_findZone.gpuBinTime.get(), 0, sizeof(int64_t) * numBins );
+
+                                const auto step = ( gpuTmax - gpuTmin ) / numBins;
+                                auto s = gpuSorted.begin();
+                                auto e = s;
+                                for( int64_t bi = 0; bi < numBins; bi++ )
+                                {
+                                    const auto nextLimit = gpuTmin + ( bi + 1 ) * step;
+                                    while( e != gpuSorted.end() && *e < nextLimit ) { m_findZone.gpuBinTime[bi] += *e; e++; }
+                                    m_findZone.gpuBins[bi] = int64_t( e - s );
+                                    s = e;
+                                }
+
+                                int64_t maxVal = 0;
+                                for( int64_t bi = 0; bi < numBins; bi++ )
+                                    if( m_findZone.gpuBins[bi] > maxVal ) maxVal = m_findZone.gpuBins[bi];
+
+                                if( maxVal > 0 )
+                                {
+                                    const auto pxns = numBins / double( gpuTmax - gpuTmin );
+                                    const auto wpos = ImGui::GetCursorScreenPos();
+                                    const auto dpos = wpos + ImVec2( 0.5f, 0.5f );
+                                    const float Height = 150.f * GetScale();
+                                    ImGui::InvisibleButton( "##gpuhist", ImVec2( w, Height ) );
+                                    auto draw = ImGui::GetWindowDrawList();
+                                    draw->AddRectFilled( wpos, wpos + ImVec2( w, Height ), 0x22FFFFFF );
+                                    draw->AddRect( wpos, wpos + ImVec2( w, Height ), 0x88FFFFFF );
+
+                                    for( int64_t bi = 0; bi < numBins; bi++ )
+                                    {
+                                        const auto val = m_findZone.gpuBins[bi];
+                                        if( val == 0 ) continue;
+                                        const auto barH = Height * val / maxVal;
+                                        draw->AddRectFilled(
+                                            dpos + ImVec2( bi,     Height - barH ),
+                                            dpos + ImVec2( bi + 1, Height ),
+                                            0xFF55BBFF );
+                                    }
+
+                                    // Draw average and median lines
+                                    const auto zitAvg = ( m_findZone.gpuAverage - gpuTmin ) * pxns;
+                                    const auto zitMed = ( m_findZone.gpuMedian  - gpuTmin ) * pxns;
+                                    draw->AddLine( dpos + ImVec2( zitAvg, 0 ), dpos + ImVec2( zitAvg, Height ), 0xFF88FF88 );
+                                    draw->AddLine( dpos + ImVec2( zitMed, 0 ), dpos + ImVec2( zitMed, Height ), 0xFF8888FF );
+                                }
+                            }
+                        }
+                    }
+
+                    // GPU zone list
+                    ImGui::Separator();
+                    if( ImGui::TreeNodeEx( ICON_FA_EYE " GPU Zone list" ) )
+                    {
+                        DrawGpuZoneList( m_findZone.selGpuMatch, gpuZones.data(), gpuZones.size() );
+                    }
+                }
+            }
         }
     }
     ImGui::EndChild();

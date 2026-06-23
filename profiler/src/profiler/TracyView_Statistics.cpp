@@ -337,6 +337,26 @@ void View::DrawStatistics()
         auto& slz = m_worker.GetGpuSourceLocationZones();
         srcloc.reserve( slz.size() );
         uint32_t slzcnt = 0;
+
+        // Build GPU thread calibration map: actual thread id -> (timeline begin, drift)
+        // Used to convert raw GPU timestamps to calibrated (CPU-aligned) time for range filtering.
+        struct GpuStatCalib { int64_t begin; int drift; };
+        unordered_flat_map<uint64_t, GpuStatCalib> gpuStatCalib;
+        for( auto& ctx : m_worker.GetGpuData() )
+        {
+            const int drift = GpuDrift( ctx );
+            for( auto& td : ctx->threadData )
+            {
+                if( td.second.timeline.empty() ) continue;
+                int64_t begin;
+                if( td.second.timeline.is_magic() )
+                    begin = ((const Vector<GpuEvent>*)&td.second.timeline)->front().GpuStart();
+                else
+                    begin = td.second.timeline.front()->GpuStart();
+                if( begin >= 0 ) gpuStatCalib[td.first] = { begin, drift };
+            }
+        }
+
         if( m_statRange.active )
         {
             const auto min = m_statRange.min;
@@ -364,12 +384,22 @@ void View::DrawStatistics()
                             for( auto& v : it->second.zones )
                             {
                                 auto& z = *v.Zone();
-                                const auto start = z.GpuStart();
-                                const auto end = z.GpuEnd();
+                                const auto tid = m_worker.DecompressThread( v.Thread() );
+                                const auto calit = gpuStatCalib.find( tid );
+                                int64_t start, end;
+                                if( calit != gpuStatCalib.end() )
+                                {
+                                    start = AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
+                                    end   = AdjustGpuTime( z.GpuEnd(),   calit->second.begin, calit->second.drift );
+                                }
+                                else
+                                {
+                                    start = z.GpuStart();
+                                    end   = z.GpuEnd();
+                                }
                                 if( start >= min && end <= max )
                                 {
-                                    const auto zt = end - start;
-                                    total += zt;
+                                    total += end - start;
                                     cnt++;
                                 }
                             }
@@ -403,12 +433,22 @@ void View::DrawStatistics()
                                 for( auto& v : it->second.zones )
                                 {
                                     auto& z = *v.Zone();
-                                    const auto start = z.GpuStart();
-                                    const auto end = z.GpuEnd();
+                                    const auto tid = m_worker.DecompressThread( v.Thread() );
+                                    const auto calit = gpuStatCalib.find( tid );
+                                    int64_t start, end;
+                                    if( calit != gpuStatCalib.end() )
+                                    {
+                                        start = AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
+                                        end   = AdjustGpuTime( z.GpuEnd(),   calit->second.begin, calit->second.drift );
+                                    }
+                                    else
+                                    {
+                                        start = z.GpuStart();
+                                        end   = z.GpuEnd();
+                                    }
                                     if( start >= min && end <= max )
                                     {
-                                        const auto zt = end - start;
-                                        total += zt;
+                                        total += end - start;
                                         cnt++;
                                     }
                                 }

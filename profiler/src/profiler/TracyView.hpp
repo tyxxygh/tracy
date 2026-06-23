@@ -307,6 +307,7 @@ private:
     unordered_flat_map<uint64_t, MemCallstackFrameTree> GetCallstackFrameTreeTopDown( const MemData& mem ) const;
     void DrawFrameTreeLevel( const unordered_flat_map<uint64_t, MemCallstackFrameTree>& tree, int& idx );
     void DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones );
+    void DrawGpuZoneList( int id, const Worker::GpuZoneThreadData* zones, size_t count );
 
     unordered_flat_map<uint64_t, CallstackFrameTree> GetCallstackFrameTreeBottomUp( const unordered_flat_map<uint32_t, uint64_t>& stacks, bool group ) const;
     unordered_flat_map<uint64_t, CallstackFrameTree> GetCallstackFrameTreeTopDown( const unordered_flat_map<uint32_t, uint64_t>& stacks, bool group ) const;
@@ -654,6 +655,7 @@ private:
         enum : uint64_t { Unselected = std::numeric_limits<uint64_t>::max() - 1 };
         enum class GroupBy : int { Thread, UserText, ZoneName, Callstack, Parent, NoGrouping };
         enum class SortBy : int { Order, Count, Time, Mtpc };
+        enum class SearchScope : int { CpuOnly, GpuOnly, Both };
 
         struct Group
         {
@@ -701,6 +703,24 @@ private:
         Range range;
         RangeSlim rangeSlim;
 
+        // GPU find zone state
+        SearchScope searchScope = SearchScope::CpuOnly;
+        std::vector<int16_t> gpuMatch;
+        int selGpuMatch = 0;
+        Vector<int64_t> gpuSorted;
+        size_t gpuSortedNum = 0;
+        float gpuAverage = 0, gpuMedian = 0;
+        int64_t gpuTotal = 0;
+        int64_t gpuTmin = std::numeric_limits<int64_t>::max();
+        int64_t gpuTmax = std::numeric_limits<int64_t>::min();
+        int64_t gpuNumBins = -1;
+        std::unique_ptr<int64_t[]> gpuBins, gpuBinTime;
+        bool gpuLogVal = false;
+        bool gpuLogTime = true;
+        bool gpuCumulateTime = false;
+        int gpuMinBinVal = 1;
+        Region gpuHighlight;
+
         struct
         {
             int numBins = -1;
@@ -723,6 +743,9 @@ private:
             highlight.active = false;
             samples.counts.clear();
             hasResults = false;
+            gpuMatch.clear();
+            selGpuMatch = 0;
+            gpuHighlight.active = false;
         }
 
         void ResetMatch()
@@ -739,6 +762,19 @@ private:
             total = 0;
             tmin = std::numeric_limits<int64_t>::max();
             tmax = std::numeric_limits<int64_t>::min();
+            ResetGpuMatch();
+        }
+
+        void ResetGpuMatch()
+        {
+            gpuSorted.clear();
+            gpuSortedNum = 0;
+            gpuAverage = 0;
+            gpuMedian = 0;
+            gpuTotal = 0;
+            gpuTmin = std::numeric_limits<int64_t>::max();
+            gpuTmax = std::numeric_limits<int64_t>::min();
+            gpuNumBins = -1;
         }
 
         void ResetGroups()
