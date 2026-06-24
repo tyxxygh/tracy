@@ -1,4 +1,6 @@
+#include <functional>
 #include <sstream>
+#include <utility>
 
 #include "TracyFilesystem.hpp"
 #include "TracyImGui.hpp"
@@ -338,129 +340,71 @@ void View::DrawStatistics()
         srcloc.reserve( slz.size() );
         uint32_t slzcnt = 0;
 
-        // Build GPU thread calibration map: actual thread id -> (timeline begin, drift)
-        // Used to convert raw GPU timestamps to calibrated (CPU-aligned) time for range filtering.
-        struct GpuStatCalib { int64_t begin; int drift; };
-        unordered_flat_map<uint64_t, GpuStatCalib> gpuStatCalib;
-        for( auto& ctx : m_worker.GetGpuData() )
-        {
-            const int drift = GpuDrift( ctx );
-            for( auto& td : ctx->threadData )
-            {
-                if( td.second.timeline.empty() ) continue;
-                int64_t begin;
-                if( td.second.timeline.is_magic() )
-                    begin = ((const Vector<GpuEvent>*)&td.second.timeline)->front().GpuStart();
-                else
-                    begin = td.second.timeline.front()->GpuStart();
-                if( begin >= 0 ) gpuStatCalib[td.first] = { begin, drift };
-            }
-        }
-
         if( m_statRange.active )
         {
             const auto min = m_statRange.min;
             const auto max = m_statRange.max;
-            const auto st = max - min;
-            for( auto it = slz.begin(); it != slz.end(); ++it )
+
+            // Aggregate GPU zones in range by walking each context's timeline with that
+            // context/thread's own begin+drift calibration (recursing into child zones). A
+            // thread-id-keyed calibration map is wrong when one submitting thread feeds several
+            // GPU contexts (e.g. main and shadow passes on different queues): the contexts have
+            // different begin/drift and the map would keep only the last, mistiming the rest.
+            unordered_flat_map<int16_t, std::pair<size_t, int64_t>> rangeAgg;
+            std::function<void( const Vector<short_ptr<GpuEvent>>&, int64_t, int )> walk =
+                [&]( const Vector<short_ptr<GpuEvent>>& vec, int64_t begin, int drift )
             {
-                if( it->second.total != 0 && it->second.min <= st )
+                auto process = [&]( const GpuEvent& ev )
                 {
-                    if( !filterActive )
+                    const auto start = AdjustGpuTime( ev.GpuStart(), begin, drift );
+                    const auto end   = AdjustGpuTime( ev.GpuEnd(),   begin, drift );
+                    if( start >= min && end <= max )
                     {
-                        auto cit = m_gpuStatCache.find( it->first );
-                        if( cit != m_gpuStatCache.end() && cit->second.range == m_statRange && cit->second.accumulationMode == m_statAccumulationMode && cit->second.sourceCount == it->second.zones.size() )
-                        {
-                            if( cit->second.count != 0 )
-                            {
-                                slzcnt++;
-                                srcloc.push_back_no_space_check( SrcLocZonesSlim { it->first, 0, cit->second.count, cit->second.total } );
-                            }
-                        }
-                        else
-                        {
-                            size_t cnt = 0;
-                            int64_t total = 0;
-                            for( auto& v : it->second.zones )
-                            {
-                                auto& z = *v.Zone();
-                                const auto tid = m_worker.DecompressThread( v.Thread() );
-                                const auto calit = gpuStatCalib.find( tid );
-                                int64_t start, end;
-                                if( calit != gpuStatCalib.end() )
-                                {
-                                    start = AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
-                                    end   = AdjustGpuTime( z.GpuEnd(),   calit->second.begin, calit->second.drift );
-                                }
-                                else
-                                {
-                                    start = z.GpuStart();
-                                    end   = z.GpuEnd();
-                                }
-                                if( start >= min && end <= max )
-                                {
-                                    total += end - start;
-                                    cnt++;
-                                }
-                            }
-                            if( cnt != 0 )
-                            {
-                                slzcnt++;
-                                srcloc.push_back_no_space_check( SrcLocZonesSlim { it->first, 0, cnt, total } );
-                            }
-                            m_gpuStatCache[it->first] = StatisticsCache { RangeSlim { m_statRange.min, m_statRange.max, m_statRange.active }, m_statAccumulationMode, it->second.zones.size(), cnt, total };
-                        }
+                        auto& e = rangeAgg[ev.SrcLoc()];
+                        e.first++;
+                        e.second += end - start;
                     }
-                    else
-                    {
-                        slzcnt++;
-                        auto& sl = m_worker.GetSourceLocation( it->first );
-                        auto name = m_worker.GetString( sl.name.active ? sl.name : sl.function );
-                        if( m_statisticsFilter.PassFilter( name ) )
-                        {
-                            auto cit = m_gpuStatCache.find( it->first );
-                            if( cit != m_gpuStatCache.end() && cit->second.range == m_statRange && cit->second.accumulationMode == m_statAccumulationMode && cit->second.sourceCount == it->second.zones.size() )
-                            {
-                                if( cit->second.count != 0 )
-                                {
-                                    srcloc.push_back_no_space_check( SrcLocZonesSlim { it->first, 0, cit->second.count, cit->second.total } );
-                                }
-                            }
-                            else
-                            {
-                                size_t cnt = 0;
-                                int64_t total = 0;
-                                for( auto& v : it->second.zones )
-                                {
-                                    auto& z = *v.Zone();
-                                    const auto tid = m_worker.DecompressThread( v.Thread() );
-                                    const auto calit = gpuStatCalib.find( tid );
-                                    int64_t start, end;
-                                    if( calit != gpuStatCalib.end() )
-                                    {
-                                        start = AdjustGpuTime( z.GpuStart(), calit->second.begin, calit->second.drift );
-                                        end   = AdjustGpuTime( z.GpuEnd(),   calit->second.begin, calit->second.drift );
-                                    }
-                                    else
-                                    {
-                                        start = z.GpuStart();
-                                        end   = z.GpuEnd();
-                                    }
-                                    if( start >= min && end <= max )
-                                    {
-                                        total += end - start;
-                                        cnt++;
-                                    }
-                                }
-                                if( cnt != 0 )
-                                {
-                                    srcloc.push_back_no_space_check( SrcLocZonesSlim { it->first, 0, cnt, total } );
-                                }
-                                m_gpuStatCache[it->first] = StatisticsCache { RangeSlim { m_statRange.min, m_statRange.max, m_statRange.active }, m_statAccumulationMode, it->second.zones.size(), cnt, total };
-                            }
-                        }
-                    }
+                    if( ev.Child() >= 0 ) walk( m_worker.GetGpuChildren( ev.Child() ), begin, drift );
+                };
+                if( vec.is_magic() )
+                {
+                    auto& v = *(Vector<GpuEvent>*)&vec;
+                    for( auto& ev : v ) process( ev );
                 }
+                else
+                {
+                    for( auto& evp : vec ) process( *evp );
+                }
+            };
+
+            for( auto& ctx : m_worker.GetGpuData() )
+            {
+                const int drift = GpuDrift( ctx );
+                for( auto& td : ctx->threadData )
+                {
+                    auto& tl = td.second.timeline;
+                    if( tl.empty() ) continue;
+                    int64_t begin;
+                    if( tl.is_magic() )
+                        begin = ((const Vector<GpuEvent>*)&tl)->front().GpuStart();
+                    else
+                        begin = tl.front()->GpuStart();
+                    if( begin < 0 ) continue;
+                    walk( tl, begin, drift );
+                }
+            }
+
+            for( auto& kv : rangeAgg )
+            {
+                if( kv.second.first == 0 ) continue;
+                if( filterActive )
+                {
+                    auto& sl = m_worker.GetSourceLocation( kv.first );
+                    auto name = m_worker.GetString( sl.name.active ? sl.name : sl.function );
+                    if( !m_statisticsFilter.PassFilter( name ) ) continue;
+                }
+                slzcnt++;
+                srcloc.push_back_no_space_check( SrcLocZonesSlim { kv.first, 0, kv.second.first, kv.second.second } );
             }
         }
         else
