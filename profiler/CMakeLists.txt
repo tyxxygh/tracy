@@ -93,6 +93,7 @@ set(SERVER_FILES
     TracyView_CpuData.cpp
     TracyView_FindZone.cpp
     TracyView_FlameGraph.cpp
+    TracyView_FrameCompare.cpp
     TracyView_FrameOverview.cpp
     TracyView_FrameTimeline.cpp
     TracyView_FrameTree.cpp

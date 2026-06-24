@@ -109,6 +109,13 @@ View::ZoneColorData View::GetZoneColorData( const ZoneEvent& ev, uint64_t thread
         ret.thickness = 1.f;
         ret.highlight = true;
     }
+    else if( m_frameCompare.highlightDiff && !m_frameCompare.highlightZonesCpu.empty() && m_frameCompare.highlightZonesCpu.find( (const void*)&ev ) != m_frameCompare.highlightZonesCpu.end() )
+    {
+        ret.color = inheritedColor ? inheritedColor : GetZoneColor( ev, thread, depth );
+        ret.accentColor = 0xFF00A5FF;   // orange accent for frame-diff zones
+        ret.thickness = 3.f;
+        ret.highlight = true;
+    }
     else if( m_findZone.show && !m_findZone.match.empty() && m_findZone.match[m_findZone.selMatch] == srcloc )
     {
         uint32_t color = 0xFF229999;
@@ -150,6 +157,12 @@ View::ZoneColorData View::GetZoneColorData( const GpuEvent& ev )
     else if( m_gpuHighlight == &ev )
     {
         ret.accentColor = 0xFF4444FF;
+        ret.thickness = 3.f;
+        ret.highlight = true;
+    }
+    else if( m_frameCompare.highlightDiff && !m_frameCompare.highlightZonesGpu.empty() && m_frameCompare.highlightZonesGpu.find( (const void*)&ev ) != m_frameCompare.highlightZonesGpu.end() )
+    {
+        ret.accentColor = 0xFF00A5FF;   // orange accent for frame-diff zones
         ret.thickness = 3.f;
         ret.highlight = true;
     }

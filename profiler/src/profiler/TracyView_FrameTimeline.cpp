@@ -150,6 +150,12 @@ void View::DrawTimelineFrames( const FrameData& frames )
                 ImGui::SameLine();
                 ImGui::TextDisabled( "(%.1f FPS)", 1000000000.0 / ftime );
                 TextFocused( "Time from start of program:", TimeToStringExact( m_worker.GetFrameBegin( frames, i ) ) );
+                if( m_frameCompare.show )
+                {
+                    ImGui::Separator();
+                    const bool pickA = m_frameCompare.frameA < 0 || m_frameCompare.frameB >= 0;
+                    ImGui::TextDisabled( ICON_FA_LEFT_RIGHT " Frame diff: click to select as %s", pickA ? "frame A" : "frame B" );
+                }
                 auto fi = m_worker.GetFrameImage( frames, i );
                 if( fi )
                 {
@@ -182,6 +188,25 @@ void View::DrawTimelineFrames( const FrameData& frames )
                 if( IsMouseClicked( 2 ) )
                 {
                     ZoomToRange( fbegin, fend );
+                }
+
+                if( m_frameCompare.show && IsMouseClicked( 0 ) && !ImGui::GetIO().KeyCtrl )
+                {
+                    auto& fc = m_frameCompare;
+                    const bool sameSet = ( fc.frameSet == &frames );
+                    if( fc.frameA < 0 || fc.frameB >= 0 || !sameSet )
+                    {
+                        // start a fresh pair: first click picks frame A
+                        fc.frameA = i;
+                        fc.frameB = -1;
+                    }
+                    else
+                    {
+                        // second click picks frame B
+                        fc.frameB = i;
+                    }
+                    fc.frameSet = &frames;
+                    fc.MarkDirty();
                 }
 
                 if( activeFrameSet ) m_frameHover = i;

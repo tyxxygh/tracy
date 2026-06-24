@@ -276,6 +276,8 @@ private:
     void DrawMemory();
     void DrawAllocList();
     void DrawCompare();
+    void DrawFrameCompare();
+    void ComputeFrameCompare();
     void DrawCallstackWindow();
     void DrawCallstackTable( uint32_t callstack, bool globalEntriesButton );
     void DrawMemoryAllocWindow();
@@ -886,6 +888,45 @@ private:
             diffs.clear();
         }
     } m_compare;
+
+    struct FrameCompareData {
+        bool show = false;
+        const FrameData* frameSet = nullptr;     // which frame set the indices refer to (nullptr => base frames)
+        int frameA = -1;                          // first picked frame
+        int frameB = -1;                          // second picked frame
+        int mode = 0;                             // 0 = GPU zones, 1 = CPU zones
+        AccumulationMode accumulationMode = AccumulationMode::SelfOnly; // CPU only
+        bool highlightDiff = true;
+        float highlightThreshold = 5.f;           // highlight zones whose |delta| >= this % of the frame-time delta
+        bool dirty = true;                        // results need recompute
+
+        struct DiffEntry {
+            int16_t srcloc;
+            int64_t timeA;
+            int64_t timeB;
+            uint32_t cntA;
+            uint32_t cntB;
+        };
+        std::vector<DiffEntry> results;           // sorted by |timeA - timeB| desc
+        int64_t frameTimeA = 0;
+        int64_t frameTimeB = 0;
+        bool resultsAreGpu = false;               // mode the cached results were computed for
+
+        unordered_flat_set<int16_t> highlightSrcLoc;        // srclocs above threshold (used to flag rows in the list)
+        unordered_flat_set<const void*> highlightZonesCpu;  // specific CPU zone instances (inside frame A/B) to highlight
+        unordered_flat_set<const void*> highlightZonesGpu;  // specific GPU zone instances (inside frame A/B) to highlight
+
+        void MarkDirty() { dirty = true; }
+        void Reset()
+        {
+            frameA = frameB = -1;
+            results.clear();
+            highlightSrcLoc.clear();
+            highlightZonesCpu.clear();
+            highlightZonesGpu.clear();
+            dirty = true;
+        }
+    } m_frameCompare;
 
     struct {
         bool show = false;

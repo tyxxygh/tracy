@@ -212,6 +212,12 @@ void View::DrawFrames()
                         ImGui::Image( m_frameTexture, ImVec2( fi->w * scale, fi->h * scale ) );
                     }
                 }
+                if( m_frameCompare.show )
+                {
+                    ImGui::Separator();
+                    const bool pickA = m_frameCompare.frameA < 0 || m_frameCompare.frameB >= 0;
+                    ImGui::TextDisabled( ICON_FA_LEFT_RIGHT " Frame diff: click to select as %s", pickA ? "frame A" : "frame B" );
+                }
                 ImGui::EndTooltip();
 
                 if( io.KeyCtrl )
@@ -221,6 +227,44 @@ void View::DrawFrames()
                         m_showPlayback = true;
                         m_playback.pause = true;
                         SetPlaybackFrame( m_frames->frames[sel].frameImage );
+                    }
+                }
+                else if( m_frameCompare.show )
+                {
+                    // While the Frame compare panel is open, plain click picks frames to compare
+                    // (first click -> frame A, second -> frame B, next click starts a new pair).
+                    // Drag-to-zoom is intentionally suppressed so it does not paint a range over A..B.
+                    if( IsMouseClicked( 0 ) )
+                    {
+                        auto& fc = m_frameCompare;
+                        const bool sameSet = ( fc.frameSet == m_frames );
+                        if( fc.frameA < 0 || fc.frameB >= 0 || !sameSet )
+                        {
+                            fc.frameA = sel;
+                            fc.frameB = -1;
+                        }
+                        else
+                        {
+                            fc.frameB = sel;
+                        }
+                        fc.frameSet = m_frames;
+                        fc.MarkDirty();
+
+                        // Zoom the timeline so the picked frames' zones are visible. The magenta
+                        // visible-range box is suppressed while comparing, so the frames between
+                        // A and B are not highlighted - only the A/B markers remain.
+                        if( fc.frameB >= 0 )
+                        {
+                            const auto a0 = m_worker.GetFrameBegin( *m_frames, fc.frameA );
+                            const auto a1 = m_worker.GetFrameEnd( *m_frames, fc.frameA );
+                            const auto b0 = m_worker.GetFrameBegin( *m_frames, fc.frameB );
+                            const auto b1 = m_worker.GetFrameEnd( *m_frames, fc.frameB );
+                            ZoomToRange( std::min( a0, b0 ), std::max( a1, b1 ) );
+                        }
+                        else
+                        {
+                            ZoomToRange( m_worker.GetFrameBegin( *m_frames, fc.frameA ), m_worker.GetFrameEnd( *m_frames, fc.frameA ) );
+                        }
                     }
                 }
                 else
@@ -426,7 +470,7 @@ void View::DrawFrames()
     }
 
     const auto zrange = m_worker.GetFrameRange( *m_frames, m_vd.zvStart, m_vd.zvEnd );
-    if( zrange.second > m_vd.frameStart && zrange.first < m_vd.frameStart + onScreen * group )
+    if( !m_frameCompare.show && zrange.second > m_vd.frameStart && zrange.first < m_vd.frameStart + onScreen * group )
     {
         auto x1 = std::min( onScreen * fwidth, ( zrange.second - m_vd.frameStart ) * fwidth / group );
         auto x0 = std::max( 0, ( zrange.first - m_vd.frameStart ) * fwidth / group );
@@ -442,6 +486,23 @@ void View::DrawFrames()
         {
             draw->AddRectFilled( wpos + ImVec2( 1+x0, 0 ), wpos + ImVec2( 1+x1, Height ), 0x55FF55FF );
         }
+    }
+
+    // Frame compare: mark frame A and frame B individually (no fill in between).
+    if( m_frameCompare.show && m_frameCompare.frameSet == m_frames )
+    {
+        const auto markFrame = [&]( int fidx, uint32_t fill, uint32_t line )
+        {
+            if( fidx < m_vd.frameStart || fidx >= m_vd.frameStart + onScreen * group ) return;
+            const int col = ( fidx - m_vd.frameStart ) / group;
+            const auto mx0 = 1 + col * fwidth;
+            const auto mx1 = ( fwidth != 1 ) ? ( fwidth + col * fwidth ) : ( mx0 + 1 );
+            draw->AddRectFilled( wpos + ImVec2( mx0, 0 ), wpos + ImVec2( mx1, Height ), fill );
+            DrawLine( draw, dpos + ImVec2( mx0, -1 ), dpos + ImVec2( mx0, Height-1 ), line );
+            DrawLine( draw, dpos + ImVec2( mx1, -1 ), dpos + ImVec2( mx1, Height-1 ), line );
+        };
+        markFrame( m_frameCompare.frameA, 0x66DD22DD, 0xFFFF55FF );   // A: magenta
+        markFrame( m_frameCompare.frameB, 0x6622DDDD, 0xFF55FFFF );   // B: cyan
     }
 
     if( frameTarget * 2 <= MaxFrameTime ) DrawLine( draw, dpos + ImVec2( 0, round( Height - Height * frameTarget * 2 / MaxFrameTime ) ), dpos + ImVec2( w, round( Height - Height * frameTarget * 2 / MaxFrameTime ) ), 0x442222DD );
