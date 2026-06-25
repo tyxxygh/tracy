@@ -278,6 +278,8 @@ private:
     void DrawCompare();
     void DrawFrameCompare();
     void ComputeFrameCompare();
+    void ShowChildStats( int16_t srcloc, bool gpu );
+    void DrawChildStats();
     void DrawCallstackWindow();
     void DrawCallstackTable( uint32_t callstack, bool globalEntriesButton );
     void DrawMemoryAllocWindow();
@@ -927,6 +929,15 @@ private:
             dirty = true;
         }
     } m_frameCompare;
+
+    // Aggregated child-zone stats: over a time range, for all instances of one
+    // source location, summarize each child zone location (count/total/mean/median/min/max).
+    struct {
+        bool show = false;
+        int16_t srcloc = -1;
+        bool gpu = false;
+        Range range;
+    } m_childStats;
 
     struct {
         bool show = false;

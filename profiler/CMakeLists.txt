@@ -87,6 +87,7 @@ set(SERVER_FILES
     TracyView.cpp
     TracyView_Annotations.cpp
     TracyView_Callstack.cpp
+    TracyView_ChildStats.cpp
     TracyView_Compare.cpp
     TracyView_ConnectionState.cpp
     TracyView_ContextSwitch.cpp

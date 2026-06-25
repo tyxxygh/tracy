@@ -1160,6 +1160,7 @@ bool View::DrawImpl()
     if( m_memInfo.showAllocList ) DrawAllocList();
     if( m_compare.show ) DrawCompare();
     if( m_frameCompare.show ) DrawFrameCompare();
+    if( m_childStats.show ) DrawChildStats();
     if( m_callstackInfoWindow != 0 ) DrawCallstackWindow();
     if( m_memoryAllocInfoWindow >= 0 ) DrawMemoryAllocWindow();
     if( m_showInfo ) DrawInfo();

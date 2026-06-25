@@ -1065,6 +1065,11 @@ void View::DrawZoneInfoWindow()
             bool expand = ImGui::TreeNode( "Child zones" );
             ImGui::SameLine();
             ImGui::TextDisabled( "(%s)", RealToString( children.size() ) );
+#ifndef TRACY_NO_STATISTICS
+            ImGui::SameLine();
+            if( ImGui::SmallButton( ICON_FA_LAYER_GROUP " Range stats" ) ) ShowChildStats( ev.SrcLoc(), false );
+            TooltipIfHovered( "Aggregate this zone's child zones over a time range (count/mean/median/min/max)" );
+#endif
             if( expand )
             {
                 if( children.is_magic() )
@@ -1640,6 +1645,11 @@ void View::DrawGpuInfoWindow()
             bool expand = ImGui::TreeNode( "Child zones" );
             ImGui::SameLine();
             ImGui::TextDisabled( "(%s)", RealToString( children.size() ) );
+#ifndef TRACY_NO_STATISTICS
+            ImGui::SameLine();
+            if( ImGui::SmallButton( ICON_FA_LAYER_GROUP " Range stats" ) ) ShowChildStats( ev.SrcLoc(), true );
+            TooltipIfHovered( "Aggregate this zone's child zones over a time range (count/mean/median/min/max)" );
+#endif
             if( expand )
             {
                 if( children.is_magic() )
